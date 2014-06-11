@@ -1,16 +1,22 @@
 /**
- * $Id: generate.c 1246 2014-02-22 19:05:19Z ales.bardorfer $
+ * $Id: generate.c 882 2013-12-16 12:46:01Z crt.valentincic $
  *
  * @brief Red Pitaya simple signal/function generator with pre-defined
  *        signal types.
  *
  * @Author Ales Bardorfer <ales.bardorfer@redpitaya.com>
+ * @Author Marko Meza <marko.meza@gmail.com>
  *
  * (c) Red Pitaya  http://www.redpitaya.com
  *
  * This part of code is written in C programming language.
  * Please visit http://en.wikipedia.org/wiki/C_(programming_language)
  * for more details on the language used herein.
+ *
+ * For all functions from standard C library it is easy to see the description
+ * using the manuals with 'man' command in GNU/Linux console. For example, to see 
+ * the description, usage and examples of function 'cos()' use command:
+ * 'man cos'
  */
 
 #include <stdio.h>
@@ -19,7 +25,6 @@
 #include <string.h>
 
 #include "fpga_awg.h"
-#include "version.h"
 
 /**
  * GENERAL DESCRIPTION:
@@ -52,10 +57,7 @@
  */
 
 /** Maximal signal frequency [Hz] */
-const double c_max_frequency = 62.5e6;
-
-/** Minimal signal frequency [Hz] */
-const double c_min_frequency = 0;
+const double c_max_frequency = 10e6;
 
 /** Maximal signal amplitude [Vpp] */
 const double c_max_amplitude = 2.0;
@@ -84,7 +86,7 @@ typedef struct {
 } awg_param_t;
 
 /* Forward declarations */
-void synthesize_signal(double ampl, double freq, signal_e type,
+void synthesize_signal(double ampl, double freq, signal_e type, double offsetVolts,
                        int32_t *data,
                        awg_param_t *params);
 void write_data_fpga(uint32_t ch,
@@ -95,18 +97,19 @@ void write_data_fpga(uint32_t ch,
 void usage() {
 
     const char *format =
-        "%s version %s-%s\n"
         "\n"
-        "Usage: %s   channel amplitude frequency <type>\n"
+		"version: Marko 20140219.1226 (alpha)\n"
+		"Remarks on version: Offset has problems with negative voltage, sqr signal is not pretty jet.\n"
+        "Usage: %s   channel amplitude frequency <type> <offset>\n"
         "\n"
         "\tchannel     Channel to generate signal on [1, 2].\n"
         "\tamplitude   Peak-to-peak signal amplitude in Vpp [0.0 - %1.1f].\n"
-        "\tfrequency   Signal frequency in Hz [%2.1f - %2.1e].\n"
+        "\tfrequency   Signal frequency in Hz [0 - %2.1e].\n"
         "\ttype        Signal type [sine, sqr, tri].\n"
+		"\toffset	   Offset (warning max signal swing is 2 Vp-p, one must be careful not to exceed it with offset)\n"
         "\n";
 
-    fprintf( stderr, format, g_argv0, VERSION_STR, REVISION_STR,
-             g_argv0, c_max_amplitude, c_min_frequency, c_max_frequency);
+    fprintf( stderr, format, g_argv0, c_max_amplitude, c_max_frequency);
 }
 
 
@@ -139,6 +142,11 @@ int main(int argc, char *argv[])
 
     /* Signal frequency argument parsing */
     double freq = strtod(argv[3], NULL);
+    if ( (freq < 0.0) || (freq > c_max_frequency ) ) {
+        fprintf(stderr, "Invalid frequency: %s\n", argv[3]);
+        usage();
+        return -1;
+    }
 
     /* Signal type argument parsing */
     signal_e type = eSignalSine;
@@ -155,17 +163,18 @@ int main(int argc, char *argv[])
             return -1;
         }
     }
-
-    /* Check frequency limits */
-    if ( (freq < c_min_frequency) || (freq > c_max_frequency ) ) {
-        fprintf(stderr, "Invalid frequency: %s\n", argv[3]);
-        usage();
-        return -1;
-    }
+	//Added by Marko
+	double offsetVolts = 0.0;
+	if(argc > 5){
+		offsetVolts = strtod(argv[5], NULL);
+		fprintf(stderr, "Using offset: %f\n", offsetVolts);
+	} 
 
     awg_param_t params;
     /* Prepare data buffer (calculate from input arguments) */
-    synthesize_signal(ampl, freq, type, data, &params);
+	//Changed by Marko
+    //synthesize_signal(ampl, freq, type, data, &params);
+	synthesize_signal(ampl, freq, type, offsetVolts, data, &params);
 
     /* Write the data to the FPGA and set FPGA AWG state machine */
     write_data_fpga(ch, data, &params);
@@ -182,10 +191,11 @@ int main(int argc, char *argv[])
  * @param freq  Signal frequency [Hz].
  * @param type  Signal type/shape [Sine, Square, Triangle].
  * @param data  Returned synthesized AWG data vector.
+ * @param offsetVolts Added by Marko
  * @param awg   Returned AWG parameters.
  *
  */
-void synthesize_signal(double ampl, double freq, signal_e type,
+void synthesize_signal(double ampl, double freq, signal_e type, double offsetVolts,
                        int32_t *data,
                        awg_param_t *awg) {
 
@@ -203,6 +213,10 @@ void synthesize_signal(double ampl, double freq, signal_e type,
 
     int trans = freq / 1e6 * trans1; /* 300 samples at 1 MHz */
     uint32_t amp = ampl * 4000.0;    /* 1 Vpp ==> 4000 DAC counts */
+	//Marko - added
+	//double offsetVolts = 1;
+	uint32_t offset = offsetVolts  * 4000.0;
+	
     if (amp > 8191) {
         /* Truncate to max value if needed */
         amp = 8191;
@@ -218,16 +232,22 @@ void synthesize_signal(double ampl, double freq, signal_e type,
         
         /* Sine */
         if (type == eSignalSine) {
-            data[i] = round(amp * cos(2*M_PI*(double)i/(double)n));
+			//Marko changed
+            //data[i] = round(amp * cos(2*M_PI*(double)i/(double)n));
+			data[i] = round( offset + amp * cos(2*M_PI*(double)i/(double)n));
         }
  
         /* Square */
         if (type == eSignalSquare) {
             data[i] = round(amp * cos(2*M_PI*(double)i/(double)n));
             if (data[i] > 0)
-                data[i] = amp;
-            else 
-                data[i] = -amp;
+				//Marko
+				//data[i] = amp;
+                data[i] = offset + amp;
+            else
+				//Marko
+                //data[i] = -amp;
+				data[i] = offset-amp;
 
             /* Soft linear transitions */
             double mm, qq, xx, xm;
@@ -269,7 +289,8 @@ void synthesize_signal(double ampl, double freq, signal_e type,
         
         /* Triangle */
         if (type == eSignalTriangle) {
-            data[i] = round(-1.0*(double)amp*(acos(cos(2*M_PI*(double)i/(double)n))/M_PI*2-1));
+            //data[i] = round(-1.0*(double)amp*(acos(cos(2*M_PI*(double)i/(double)n))/M_PI*2-1));
+			data[i] = round(offset-1.0*(double)amp*(acos(cos(2*M_PI*(double)i/(double)n))/M_PI*2-1));
         }
         
         /* TODO: Remove, not necessary in C/C++. */
